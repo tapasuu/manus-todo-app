@@ -1,6 +1,6 @@
 import { eq, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { users, todos, InsertUser, InsertTodo, Todo } from "../drizzle/schema";
+import { users, todos, InsertUser, InsertTodo, Todo, User } from "../drizzle/schema";
 import { ENV } from "./env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -55,7 +55,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
 }
 
-export async function getUserByOpenId(openId: string) {
+export async function getUserByOpenId(openId: string): Promise<User | undefined> {
   const db = await getDb();
   if (!db) return undefined;
 
@@ -68,22 +68,60 @@ export async function getUserByOpenId(openId: string) {
   return result[0];
 }
 
+export async function getUserById(id: number): Promise<User | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+
+  const result = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, id))
+    .limit(1);
+
+  return result[0];
+}
+
+// 開発用ユーザーを作成または取得
+export async function getOrCreateDevUser(): Promise<User | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+
+  const devOpenId = "dev-user-001";
+
+  // 既存のdevユーザーを検索
+  let devUser = await getUserByOpenId(devOpenId);
+
+  if (!devUser) {
+    // 存在しなければ作成
+    await db.insert(users).values({
+      openId: devOpenId,
+      name: "開発ユーザー",
+      email: "dev@example.com",
+      loginMethod: "dev",
+      role: "user",
+    });
+    devUser = await getUserByOpenId(devOpenId);
+  }
+
+  return devUser;
+}
+
 // Todo関連
 export async function createTodo(data: InsertTodo): Promise<Todo | undefined> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  await db.insert(todos).values(data);
+  const result = await db.insert(todos).values(data);
+  const insertId = result[0].insertId;
 
   // 作成したTodoを取得
-  const result = await db
+  const created = await db
     .select()
     .from(todos)
-    .where(eq(todos.userId, data.userId))
-    .orderBy(todos.id)
+    .where(eq(todos.id, insertId))
     .limit(1);
 
-  return result[0];
+  return created[0];
 }
 
 export async function getTodosByUserId(userId: number): Promise<Todo[]> {

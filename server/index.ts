@@ -7,7 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { appRouter } from "./routers";
 import { ENV } from "./env";
-import { getUserByOpenId, upsertUser } from "./db";
+import { getUserByOpenId, upsertUser, getOrCreateDevUser } from "./db";
 import { COOKIE_NAME, ONE_YEAR_MS } from "../shared/const";
 import type { TrpcContext } from "./context";
 
@@ -20,16 +20,38 @@ const PORT = process.env.PORT || 3000;
 // JWT シークレットキー
 const secret = new TextEncoder().encode(ENV.cookieSecret);
 
+// 開発モード判定
+const isDevMode = ENV.isDevMode;
+
+if (isDevMode) {
+  console.log("========================================");
+  console.log("  開発モードで起動中 (DEV_MODE=true)");
+  console.log("  - ダミーログイン有効");
+  console.log("  - MySQL: " + ENV.databaseUrl.split("@")[1]?.split("/")[0]);
+  console.log("========================================");
+}
+
 // ユーザー取得ミドルウェア
 async function getUserFromCookie(
   cookieHeader: string | undefined
 ): Promise<TrpcContext["user"]> {
+  // 開発モード: クッキーがなければ開発ユーザーを返す
+  if (isDevMode && !cookieHeader) {
+    return await getOrCreateDevUser() ?? null;
+  }
+
   if (!cookieHeader) return null;
 
   try {
     const cookies = cookie.parse(cookieHeader);
     const token = cookies[COOKIE_NAME];
-    if (!token) return null;
+    if (!token) {
+      // 開発モードならdevユーザーを返す
+      if (isDevMode) {
+        return await getOrCreateDevUser() ?? null;
+      }
+      return null;
+    }
 
     const { payload } = await jose.jwtVerify(token, secret);
     const openId = payload.sub;
@@ -37,6 +59,10 @@ async function getUserFromCookie(
 
     return (await getUserByOpenId(openId)) ?? null;
   } catch {
+    // 開発モードならdevユーザーを返す
+    if (isDevMode) {
+      return await getOrCreateDevUser() ?? null;
+    }
     return null;
   }
 }
@@ -53,8 +79,37 @@ app.use(
   })
 );
 
+// 開発モード用: 自動ログインエンドポイント
+if (isDevMode) {
+  app.get("/api/dev/auto-login", async (_req, res) => {
+    const devUser = await getOrCreateDevUser();
+    if (!devUser) {
+      return res.status(500).send("Dev user not available");
+    }
+
+    const jwt = await new jose.SignJWT({ sub: devUser.openId })
+      .setProtectedHeader({ alg: "HS256" })
+      .setExpirationTime("1y")
+      .sign(secret);
+
+    res.cookie(COOKIE_NAME, jwt, {
+      httpOnly: true,
+      secure: false,
+      sameSite: "lax",
+      maxAge: ONE_YEAR_MS,
+    });
+
+    res.redirect("/");
+  });
+}
+
 // OAuth コールバック（Manus環境用）
 app.get("/api/oauth/callback", async (req, res) => {
+  // 開発モードではスキップ
+  if (isDevMode) {
+    return res.redirect("/api/dev/auto-login");
+  }
+
   const { token, state } = req.query;
 
   if (!token || typeof token !== "string") {
@@ -119,5 +174,5 @@ if (ENV.isProduction) {
 }
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
